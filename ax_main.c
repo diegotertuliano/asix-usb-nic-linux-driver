@@ -1535,8 +1535,10 @@ static int ax_tx_poll_qx(struct ax_device *axdev, struct napi_struct *tx_napi,
 
 	if (test_bit(AX_UNPLUG, &axdev->flags) ||
 	    !test_bit(AX_ENABLE, &axdev->flags) ||
-	    !netif_carrier_ok(axdev->netdev))
-		return -1;
+	    !netif_carrier_ok(axdev->netdev)) {
+		napi_complete_done(tx_napi, 0);
+		return 0;
+	}
 
 	clear_bit(AX_SCHEDULE_NAPI_TX, &axdev->flags);
 
