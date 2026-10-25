@@ -2791,6 +2791,9 @@ static int ax_pre_reset(struct usb_interface *intf)
 #else
 	napi_disable(&axdev->rx_napi);
 #endif
+	/* USB reset requires all bulk I/O to be stopped first. */
+	ax_kill_tx_urbs(axdev);
+	ax_stop_rx(axdev);
 	return 0;
 }
 
