@@ -2814,13 +2814,6 @@ static int ax_post_reset(struct usb_interface *intf)
 		mutex_unlock(&axdev->control);
 	}
 	
-	for (i = 0; i < axdev->driver_info->tx_num; i++)
-#ifdef ENABLE_TX_TASKLET
-		tasklet_disable(&axdev->tx_tl[i]);
-#else
-		napi_enable(&axdev->tx_napi[i]);
-#endif
-
 #ifdef ENABLE_RX_TASKLET
 	tasklet_enable(&axdev->rx_tl);
 #else
