@@ -1,0 +1,8 @@
+# Preserve the vendor source and checksum-pinned patches byte for byte.
+*.c -text
+*.h -text
+/Makefile -text
+/Readme -text
+/*.rules -text
+/*.conf -text
+/packaging/arch/*.patch -text -whitespace

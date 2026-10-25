@@ -1,97 +1,51 @@
-# ASIX USB to 2.5G/Gigabit/Fast Ethernet Linux driver (`ax_usb_nic.ko`) 
+# ASIX USB Ethernet 4.2.0 with reset recovery fixes
 
-This is the official **ASIX USB 3.2 / USB 2.0 to 2.5G/Gigabit/Fast Ethernet Linux driver** source for AX88279A, AX88279, AX88179B/A, AX88772E/D, and AX88178A controllers (module name: `ax_usb_nic.ko`), which is suitable for edge AI computers, Desktop/Notebook/POS, USB Ethernet dongles, docking stations, smart mobile device cradles, game consoles, smart camera/IP STB, 5G/LTE router/gateway, and smart home/office devices applications. 
+Unofficial fork of the [ASIX Linux driver](https://github.com/ASIXElectronics/asix-usb-nic-linux-driver), based on the vendor's **4.2.0** source release. It adds the AUR TX-NAPI fix and USB reset recovery changes tested with an **AX88179B** on **Linux 6.6.156-2-MANJARO**.
 
----
-## ASIX USB Ethernet ICs 
-- [ASIX USB Ethernet Chips](https://www.asix.com.tw/en/product/USBEthernet)
+Before these changes, a USB reset (for example the one queued after a TX timeout) hit a kernel BUG in `napi_enable()` from `ax_post_reset()` and Ethernet stayed down until reboot. With them, the adapter recovers in place in about four seconds, keeping its configured MAC, checksum offload and multicast settings. This does not identify the trigger of the original spontaneous TX timeout. See [test results and limitations](docs/testing.md).
 
-### Supported ICs
-These controllers are bound by the `ax_usb_nic` network driver. All ASIX devices
-enumerate under **VID `0x0B95`**; the exact IC is selected by the USB `bcdDevice`
-value.
+## Changes
 
-| IC | USB VID:PID | `bcdDevice` | Interface |
-|----|-------------|-------------|-----------|
-| **AX88279A** | `0B95:1790` | `0x0500` | USB 3.2 to 2.5G Ethernet Chips |
-| **AX88279**  | `0B95:1790` | `0x0400` | USB 3.2 to 2.5G Ethernet Chips |
-| **AX88179B, AX88179A** | `0B95:1790` | `0x0200` | USB 3.2 to Gigabit Ethernet Chips |
-| **AX88179**  | `0B95:1790` | `0x0100` | USB 3.2 to Gigabit Ethernet Chips |
-| **AX88178A** | `0B95:178A` | —        | USB 2.0 to Gigabit Ethernet Chips |
-| **AX88772E, AX88772D** | `0B95:1790` | `0x0300` | USB 2.0 to Fast Ethernet Chips |
+Each change has a separate commit on `main`:
 
-> **AX88179B** and **AX88772E** are newer silicon revisions of AX88179A / AX88772D
-> respectively; they enumerate under the same IDs and are handled by the same
-> driver. They are also covered by the bundled programming tool (below).
+1. Import untouched vendor 4.2.0 files, tagged `vendor-4.2.0`.
+2. Apply Maykel Moya's AUR patch to complete TX NAPI on early exit.
+3. Remove the duplicate TX NAPI enable (tasklet: extra disable) in `ax_post_reset()`.
+4. Drain outstanding bulk RX/TX transfers in `ax_pre_reset()`, as the USB reset API requires.
+5. Program TX checksum offload from the configured netdev features in `ax88179a_hw_init()` instead of always enabling it. This also fixes `ethtool -K tx off` being undone by ifdown/ifup or resume.
+6. For `AX_VERSION_AX88179A_772D`, restore firmware mode and run `hw_init` after reset, force a fresh link event, and replay the receive mode. On failure, return an error so the USB core re-probes the interface.
 
-### Bundled flash / eFuse programming tools
+Other device families get changes 3–4 only; their hardware is not reinitialized after reset. Alternate build options (tasklets, PTP, queue priority) compile but were not tested on hardware. This fork is not an official ASIX release.
 
-The package also ships user-space programming utilities that support:
+[Source provenance and patch credits](docs/provenance.md) document the archive checksum and AUR revision. The vendor's [Readme](Readme) remains unchanged.
 
-| Tool | Supported ICs |
-|------|---------------|
-| `ax88179a_programmer` | AX88179B, AX88179A, AX88772E, AX88772D |
-| `ax88279_programmer`  | AX88279A, AX88279 |
-| `ax88179_programmer`  | AX88179 |
+## Build the module
 
-### Compatible OEM / third-party adapters
-
-The driver also binds the following AX88179-based OEM products:
-
-| Vendor | USB VID:PID |
-|--------|-------------|
-| Sitecom | `0DF6:0072` |
-| Lenovo  | `17EF:304B` |
-| Toshiba | `0930:0A13` |
-| Samsung | `04E8:A100` |
-| D-Link  | `2001:4A00` |
-| Magic Control | `0711:0179` |
-
----
-
-## Prerequisites
-
-- Linux kernel sources installed and matching the running kernel.
-- Kernel built with USB host support (XHCI / EHCI / OHCI / UHCI).
-
-## Build
+Install a C toolchain and kernel headers matching the target kernel. From the repository root:
 
 ```sh
-make
+make -C /lib/modules/"$(uname -r)"/build M="$PWD" modules
+modinfo ./ax_usb_nic.ko
 ```
 
-On success, `ax_usb_nic.ko` is produced in the current directory.
+This builds only the module, without installing or loading it. The original `make` target also builds the vendor's programming utilities, which these fixes do not need.
 
-## Install & load
+## Arch / Manjaro DKMS package
+
+[packaging/arch](packaging/arch) contains local package version **4.2.0-1.5**, the build installed and reset-tested on the physical host. It downloads the checksum-verified vendor archive and applies the AUR patch plus `0003-reset-recovery.patch` (changes 3–6), producing the same driver sources as this checkout byte for byte.
+
+With `base-devel`, `dkms` and matching kernel headers installed:
 
 ```sh
-sudo make install            # install module into the system
-sudo modprobe ax_usb_nic     # load
-sudo modprobe -r ax_usb_nic  # unload
-modinfo ax_usb_nic           # module info
+cd packaging/arch
+makepkg --cleanbuild
+sudo pacman -U ./asix-ax88179-dkms-4.2.0-1.5-any.pkg.tar.zst
 ```
 
-Additional install targets:
+Installing the package rebuilds the DKMS module; it does not replace an already loaded module. The recipe uses the same package name as AUR `asix-ax88179-dkms`, so a later AUR upgrade can replace these local patches. Review its changes before upgrading.
 
-```sh
-sudo make udev_install       # install udev rule to avoid CDC driver binding
-sudo make blacklist_install  # blacklist the in-box ax88179_178a driver (reboot required)
-sudo make install_all        # install driver + all configuration files
-```
-
-### Manual load
-
-```sh
-sudo modprobe mii
-sudo insmod ax_usb_nic.ko
-sudo rmmod ax_usb_nic
-```
-
----
+The tests kept USB autosuspend disabled for the adapter. That power policy is external to the driver and is not installed by this package.
 
 ## License
 
-GPL-2.0. Portions of this driver derive from the Linux kernel; original
-copyright notices are retained in the respective source files.
-
-Copyright (c) ASIX Electronics Corporation.
+Original source notices are retained. The files contain GPL notices, including GPL version 2 or later language; see the individual file headers and [COPYING](COPYING). Original driver copyright belongs to ASIX Electronics Corporation and the other credited authors. The AUR patch retains Maykel Moya's authorship in Git history.
