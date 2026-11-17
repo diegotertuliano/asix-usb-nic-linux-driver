@@ -44,3 +44,27 @@ Conclusions for this adapter: a USB port reset keeps the MAC-side configuration 
 ## What these tests do not establish
 
 Other chips (AX88772D shares the reset path but was not tested), other kernels, tasklet/PTP/queue-priority builds, autosuspend-enabled operation, suspend/resume, MTU/pause/EEE settings, VLAN traffic, and concurrent configuration changes during a reset were not covered on hardware. Changing the interface's up/down state while a reset is in progress can still unbalance NAPI. That is a pre-existing limitation, not introduced by these changes. These resets do not prove that spontaneous TX timeouts can no longer occur.
+
+# Oversized-GSO TX wedge — 2026-11-17 (4.2.0-1.6)
+
+## Cause
+
+The spontaneous TX timeouts (2026-11-08, 11-10, 11-15) were not a hardware or USB fault. `ax88179a_772d.c` advertised `tso_max_size = tx_casecade_size` (23552), but `ax88179a_tx_fixup()` needs an 8-byte header per frame inside that buffer. The core software-segments GSO frames only when `skb->len >= gso_max_size` (`gso_within_dev_limits()` in `net/core/dev.c`), so frames of 23545–23551 bytes reached the driver whole. Even an empty buffer could not hold them, so the fixup requeued each one at the queue head, packed nothing, and repeated forever. Nothing behind it was sent, the netdev watchdog fired, and `ax_tx_timeout()` queued a USB reset. The reset leaves the software TX queue intact, so the same frame wedged TX again within seconds. Only recreating the netdev (re-enumeration, rmmod, reboot) cleared it. Such frames are rare: they come from GRO-aggregated forwarded TCP (Docker bridge, Tailscale) whose length lands in a 7-byte window.
+
+The vendor source contains the correct value (`tx_casecade_size - AX88179A_TX_HEADER_SIZE`) behind `#if 0`.
+
+## Fix (`0004-tx-oversize-frame.patch`)
+
+- Advertise `tx_casecade_size - AX88179A_TX_HEADER_SIZE` (23544) for the 179A family.
+- In both TX fixups, drop (rate-limited warning, `tx_dropped`) a frame that does not fit an empty buffer instead of requeueing it.
+- Do not submit a zero-length TX URB when nothing was packed.
+- Clamp the TX NAPI poll's return value to its budget (work counts GSO segments; seen as `returned 65, exceeding its budget of 64` on 2026-11-13).
+
+## Test (physical host, Linux 7.3.3, `tools/test-gso-oversize.sh`)
+
+`tools/gso-oversize-repro.py` injects a TCPv4 GSO frame of an exact length with AF_PACKET + `PACKET_VNET_HDR`, so it passes through the qdisc and `validate_xmit_skb()` like forwarded traffic.
+
+| Driver | Frames | Outcome |
+| --- | --- | --- |
+| 4.2.0-1.5 (`D26A8FC63059B21D86A6E9A`) | one 23548-byte frame | Gateway ping 5/5 before, 0/5 15 s later. Then the 11-08 loop: TX timeout, USB reset, link up, timeout again within seconds (663 timeouts over 71 minutes; the test script hung on a blocked ping and the watchdog was stopped). `rmmod` cleared it. |
+| 1.6 build (`8E42AAEE81B02B78A835410`, `insmod`) | 3 each of 23543, 23544, 23545, 23548, 23551, 23552, 23600 bytes | `tso_max_size`/`gso_max_size` 23544. No TX timeout, `tx_dropped` 0, gateway ping 5/5 after. Everything at or above the limit was segmented by the core, so the driver's drop path was not exercised. |

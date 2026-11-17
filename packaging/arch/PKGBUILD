@@ -4,7 +4,7 @@
 pkgname=asix-ax88179-dkms
 _pkgname="${pkgname%-*}"
 pkgver=4.2.0
-pkgrel=1.5
+pkgrel=1.6
 pkgdesc='A kernel module for ASIX AX88179B USB network adapters'
 url="https://www.asix.com.tw/en/product/USBEthernet/Super-Speed_USB_Ethernet/AX88179B"
 license=('GPL-2.0-or-later')
@@ -18,6 +18,7 @@ source=(
     'modprobe.conf'
     '0002-Complete-TX-NAPI-on-early-exit.patch'
     '0003-reset-recovery.patch'
+    '0004-tx-oversize-frame.patch'
 )
 sha256sums=(
     'dc8d89b1060ac2b0a4829d862f1cb39fbcb9fa5876746f8ff7b187567d237cfc'
@@ -25,6 +26,7 @@ sha256sums=(
     '652e3715724de0c1893ffbdfc48a66c7c09e82015429f10254869934dea40b55'
     '5ba79ac2d61ea9ece2ecb5c5219b109411d87e86b567b95511213de6571adf5d'
     '0866dde7dcf8bd55868616dab79fea63823025a72f067f037a9196d8bbc11c4e'
+    '31b8a96e8b35c03beeb92aee2b392b160521f7fa805fd5dfdb65196a742f3015'
 )
 
 prepare() {
@@ -33,6 +35,8 @@ prepare() {
     patch --binary -p2 -d "${_archivename}" <0002-Complete-TX-NAPI-on-early-exit.patch
 
     patch --binary -p2 -d "${_archivename}" <0003-reset-recovery.patch
+
+    patch --binary -p2 -d "${_archivename}" <0004-tx-oversize-frame.patch
 }
 
 package() {

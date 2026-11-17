@@ -1486,14 +1486,18 @@ static int ax88179a_bind(struct ax_device *axdev)
 	}
 
 	axdev->tx_casecade_size = axdev->tx_buf - KB_SIZE;
-#if 0
+	/*
+	 * ax88179a_tx_fixup() puts an 8-byte header in front of each frame
+	 * inside the tx_casecade_size buffer, so a GSO frame must leave room
+	 * for it.  Advertising the whole buffer let frames of
+	 * casecade - 7 .. casecade - 1 bytes pass the core's
+	 * skb->len >= gso_max_size check but never fit, wedging TX.
+	 */
 	if (axdev->chip_version == AX_VERSION_AX88279A)
-		axdev->gso_max_size = TX_CASECADES_SIZE;
+		axdev->gso_max_size = axdev->tx_casecade_size;
 	else
-		axdev->gso_max_size = axdev->tx_casecade_size - AX88179A_TX_HEADER_SIZE;
-#else
-	axdev->gso_max_size = axdev->tx_casecade_size;
-#endif
+		axdev->gso_max_size = axdev->tx_casecade_size -
+				      AX88179A_TX_HEADER_SIZE;
 	axdev->mii.supports_gmii = true;
 	axdev->mii.dev = netdev;
 	axdev->mii.mdio_read = ax_mdio_read;
@@ -3727,6 +3731,21 @@ static int ax88179a_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
 			break;
 
 		if ((skb->len + AX88179A_TX_HEADER_SIZE) > remain) {
+			if (tx_data == desc->head) {
+				/*
+				 * Too large even for an empty buffer.  Requeueing
+				 * it would block the queue head forever (a USB
+				 * reset keeps the queue), so drop it.
+				 */
+				if (net_ratelimit())
+					netdev_warn(axdev->netdev,
+						    "dropping oversized TX frame: len %u gso_size %u\n",
+						    skb->len,
+						    skb_shinfo(skb)->gso_size);
+				stats->tx_dropped += skb_shinfo(skb)->gso_segs ?: 1;
+				dev_kfree_skb_any(skb);
+				continue;
+			}
 			__skb_queue_head(&skb_head, skb);
 			break;
 		}
@@ -3790,6 +3809,10 @@ static int ax88179a_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
 		netif_wake_queue(axdev->netdev);
 	}
 	netif_tx_unlock(axdev->netdev);
+
+	/* Nothing was packed (every frame dropped): send no empty URB. */
+	if (tx_data == desc->head)
+		return -ENODATA;
 
 	ret = usb_autopm_get_interface_async(axdev->intf);
 	if (ret < 0)

@@ -1,0 +1,120 @@
+Fix the AX88179A TX wedge on frames that never fit a TX buffer
+
+The 179A path advertised tso_max_size = tx_casecade_size, but each frame
+needs an 8-byte header inside that buffer. GSO frames of casecade-7 ..
+casecade-1 bytes (23545..23551) passed the core's skb->len >= gso_max_size
+check, never fit, and were requeued at the queue head forever; a USB reset
+keeps the queue, so TX stayed wedged until the netdev was recreated.
+
+Advertise casecade minus the header, drop (with a warning) any frame too
+large even for an empty buffer in both TX fixups, never submit an empty
+TX URB, and clamp the TX NAPI poll's return value to its budget.
+
+diff --git a/src/ax88179_178a.c b/src/ax88179_178a.c
+index 7bc1727..efc6a6a 100644
+--- a/src/ax88179_178a.c
++++ b/src/ax88179_178a.c
+@@ -1082,6 +1082,21 @@ static int ax88179_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
+ 			break;
+ 
+ 		if ((skb->len + AX_TX_HEADER_LEN) > remain) {
++			if (tx_data == desc->head) {
++				/*
++				 * Too large even for an empty buffer.  Requeueing
++				 * it would block the queue head forever (a USB
++				 * reset keeps the queue), so drop it.
++				 */
++				if (net_ratelimit())
++					netdev_warn(axdev->netdev,
++						    "dropping oversized TX frame: len %u gso_size %u\n",
++						    skb->len,
++						    skb_shinfo(skb)->gso_size);
++				stats->tx_dropped += skb_shinfo(skb)->gso_segs ?: 1;
++				dev_kfree_skb_any(skb);
++				continue;
++			}
+ 			__skb_queue_head(&skb_head, skb);
+ 			break;
+ 		}
+diff --git a/src/ax88179a_772d.c b/src/ax88179a_772d.c
+index f751e79..2449e58 100644
+--- a/src/ax88179a_772d.c
++++ b/src/ax88179a_772d.c
+@@ -1486,14 +1486,18 @@ static int ax88179a_bind(struct ax_device *axdev)
+ 	}
+ 
+ 	axdev->tx_casecade_size = axdev->tx_buf - KB_SIZE;
+-#if 0
++	/*
++	 * ax88179a_tx_fixup() puts an 8-byte header in front of each frame
++	 * inside the tx_casecade_size buffer, so a GSO frame must leave room
++	 * for it.  Advertising the whole buffer let frames of
++	 * casecade - 7 .. casecade - 1 bytes pass the core's
++	 * skb->len >= gso_max_size check but never fit, wedging TX.
++	 */
+ 	if (axdev->chip_version == AX_VERSION_AX88279A)
+-		axdev->gso_max_size = TX_CASECADES_SIZE;
++		axdev->gso_max_size = axdev->tx_casecade_size;
+ 	else
+-		axdev->gso_max_size = axdev->tx_casecade_size - AX88179A_TX_HEADER_SIZE;
+-#else
+-	axdev->gso_max_size = axdev->tx_casecade_size;
+-#endif
++		axdev->gso_max_size = axdev->tx_casecade_size -
++				      AX88179A_TX_HEADER_SIZE;
+ 	axdev->mii.supports_gmii = true;
+ 	axdev->mii.dev = netdev;
+ 	axdev->mii.mdio_read = ax_mdio_read;
+@@ -3727,6 +3731,21 @@ static int ax88179a_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
+ 			break;
+ 
+ 		if ((skb->len + AX88179A_TX_HEADER_SIZE) > remain) {
++			if (tx_data == desc->head) {
++				/*
++				 * Too large even for an empty buffer.  Requeueing
++				 * it would block the queue head forever (a USB
++				 * reset keeps the queue), so drop it.
++				 */
++				if (net_ratelimit())
++					netdev_warn(axdev->netdev,
++						    "dropping oversized TX frame: len %u gso_size %u\n",
++						    skb->len,
++						    skb_shinfo(skb)->gso_size);
++				stats->tx_dropped += skb_shinfo(skb)->gso_segs ?: 1;
++				dev_kfree_skb_any(skb);
++				continue;
++			}
+ 			__skb_queue_head(&skb_head, skb);
+ 			break;
+ 		}
+@@ -3791,6 +3810,10 @@ static int ax88179a_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
+ 	}
+ 	netif_tx_unlock(axdev->netdev);
+ 
++	/* Nothing was packed (every frame dropped): send no empty URB. */
++	if (tx_data == desc->head)
++		return -ENODATA;
++
+ 	ret = usb_autopm_get_interface_async(axdev->intf);
+ 	if (ret < 0)
+ 		return ret;
+diff --git a/src/ax_main.c b/src/ax_main.c
+index b991f8f..e1c78db 100644
+--- a/src/ax_main.c
++++ b/src/ax_main.c
+@@ -1543,7 +1543,14 @@ static int ax_tx_poll_qx(struct ax_device *axdev, struct napi_struct *tx_napi,
+ 	clear_bit(AX_SCHEDULE_NAPI_TX, &axdev->flags);
+ 
+ 	ax_tx_bottom(axdev, queue_index, budget, &work_done);
+-	
++
++	/*
++	 * work_done counts GSO segments, so one URB can push it past the
++	 * budget, and NAPI warns when a poll returns more than budget.
++	 */
++	if (work_done > budget)
++		work_done = budget;
++
+ 	if (work_done < budget) {
+ #if KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE
+ 		napi_complete_done(tx_napi, 0);

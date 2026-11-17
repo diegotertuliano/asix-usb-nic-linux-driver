@@ -1082,6 +1082,21 @@ static int ax88179_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
 			break;
 
 		if ((skb->len + AX_TX_HEADER_LEN) > remain) {
+			if (tx_data == desc->head) {
+				/*
+				 * Too large even for an empty buffer.  Requeueing
+				 * it would block the queue head forever (a USB
+				 * reset keeps the queue), so drop it.
+				 */
+				if (net_ratelimit())
+					netdev_warn(axdev->netdev,
+						    "dropping oversized TX frame: len %u gso_size %u\n",
+						    skb->len,
+						    skb_shinfo(skb)->gso_size);
+				stats->tx_dropped += skb_shinfo(skb)->gso_segs ?: 1;
+				dev_kfree_skb_any(skb);
+				continue;
+			}
 			__skb_queue_head(&skb_head, skb);
 			break;
 		}

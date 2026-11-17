@@ -1543,7 +1543,14 @@ static int ax_tx_poll_qx(struct ax_device *axdev, struct napi_struct *tx_napi,
 	clear_bit(AX_SCHEDULE_NAPI_TX, &axdev->flags);
 
 	ax_tx_bottom(axdev, queue_index, budget, &work_done);
-	
+
+	/*
+	 * work_done counts GSO segments, so one URB can push it past the
+	 * budget, and NAPI warns when a poll returns more than budget.
+	 */
+	if (work_done > budget)
+		work_done = budget;
+
 	if (work_done < budget) {
 #if KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE
 		napi_complete_done(tx_napi, 0);
